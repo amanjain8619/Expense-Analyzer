@@ -36,11 +36,14 @@ def extract_transactions_from_pdf(pdf_file, account_name):
     regex_patterns = [
         r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",   # dd/mm/yyyy
         r"(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",   # dd-mm-yyyy
-        r"([A-Za-z]{3}\s+\d{1,2},\s+\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})"  # Aug 14, 2025
+        r"([A-Za-z]{3}\s+\d{1,2},\s+\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",  # Aug 14, 2025
+        r"(.+?)\s+(-?\d[\d,]*\.\d{2})"  # fallback: merchant + amount (no date)
     ]
 
     with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            page_txns = 0
+
             # 1️⃣ Try table extraction
             table = page.extract_table()
             if table:
@@ -54,9 +57,11 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                         amt = amt_raw.replace(",", "").replace("(", "-").replace(")", "")
                         try:
                             amt = float(amt)
+                            transactions.append([date_raw, desc.strip(), amt, account_name])
+                            page_txns += 1
                         except:
                             continue
-                        transactions.append([date_raw, desc.strip(), amt, account_name])
+                st.info(f"📄 Page {page_num}: extracted {page_txns} rows from table")
                 continue  # go to next page if table worked
 
             # 2️⃣ Fallback to regex over text
@@ -68,16 +73,25 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                 for pattern in regex_patterns:
                     match = re.match(pattern, line)
                     if match:
-                        date, merchant, amount = match.groups()
+                        groups = match.groups()
+                        if len(groups) == 3:  # full match with date
+                            date, merchant, amount = groups
+                        elif len(groups) == 2:  # fallback match
+                            date, (merchant, amount) = "N/A", groups
                         amt = amount.replace(",", "").replace("(", "-").replace(")", "")
                         try:
                             amt = float(amt)
+                            transactions.append([date, merchant.strip(), amt, account_name])
+                            page_txns += 1
                         except:
                             continue
-                        transactions.append([date, merchant.strip(), amt, account_name])
                         break
+            st.info(f"📄 Page {page_num}: extracted {page_txns} rows from text")
 
-    return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
+    df = pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
+    if df.empty:
+        st.warning("⚠️ No transactions extracted. Please check if the PDF is text-based and uses a supported format.")
+    return df
 
 # Categorize expenses
 def categorize_expenses(df):
