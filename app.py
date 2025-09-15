@@ -54,7 +54,7 @@ def clean_amount(amt_str):
         return 0.0
 
 # ==============================
-# Extraction function (without OCR)
+# Extraction function (only pdfplumber, no OCR)
 # ==============================
 def extract_transactions_from_pdf(uploaded_file, account_name):
     transactions = []
@@ -66,7 +66,7 @@ def extract_transactions_from_pdf(uploaded_file, account_name):
 
     try:
         with pdfplumber.open(uploaded_file) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
+            for page in pdf.pages:
                 table = page.extract_table()
                 if table:
                     headers = [h.lower() if h else "" for h in table[0]]
@@ -99,16 +99,8 @@ def extract_transactions_from_pdf(uploaded_file, account_name):
                                     account_name
                                 ])
                                 break
-                else:
-                    st.warning(f"⚠️ Page {page_num} had no extractable text.")
-
     except Exception as e:
         st.error(f"❌ PDF parsing failed: {e}")
-
-    # Skip OCR for Streamlit Cloud
-    if not transactions:
-        st.warning("⚠️ No transactions extracted. If this is a scanned PDF, OCR is required. "
-                   "OCR is not supported on Streamlit Cloud — please try with a text-based PDF.")
 
     return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
 
