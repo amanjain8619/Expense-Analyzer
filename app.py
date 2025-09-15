@@ -5,6 +5,16 @@ import re
 import matplotlib.pyplot as plt
 from rapidfuzz import process
 from io import BytesIO
+from dateutil.parser import parse
+import tempfile
+
+# ==============================
+# Page config
+# ==============================
+st.set_page_config(page_title="Expense Analyzer", layout="wide")
+
+st.title("💳 Multi-Account Expense Analyzer")
+st.write("Upload your bank/credit card statements, categorize expenses, and compare across accounts.")
 
 # ==============================
 # Load vendor mapping
@@ -29,76 +39,114 @@ def get_category(merchant):
     return "Others"
 
 # ==============================
-# Improved PDF extraction
+# Helpers
 # ==============================
-def extract_transactions_from_pdf(pdf_file, account_name):
+def clean_date(date_str):
+    try:
+        return parse(date_str, dayfirst=True).date()
+    except Exception:
+        return date_str
+
+def clean_amount(amt_str):
+    amt_str = amt_str.replace(",", "").replace("(", "-").replace(")", "")
+    try:
+        return float(amt_str)
+    except Exception:
+        return 0.0
+
+# ==============================
+# Extraction function (with OCR fallback)
+# ==============================
+def extract_transactions_from_pdf(uploaded_file, account_name):
     transactions = []
     regex_patterns = [
-        r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",   # dd/mm/yyyy
-        r"(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",   # dd-mm-yyyy
-        r"([A-Za-z]{3}\s+\d{1,2},\s+\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",  # Aug 14, 2025
-        r"(.+?)\s+(-?\d[\d,]*\.\d{2})"  # fallback: merchant + amount (no date)
+        r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",
+        r"(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",
+        r"([A-Za-z]{3}\s+\d{1,2},\s+\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})"
     ]
 
-    with pdfplumber.open(pdf_file) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
-            page_txns = 0
+    try:
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                table = page.extract_table()
+                if table:
+                    headers = [h.lower() if h else "" for h in table[0]]
+                    for row in table[1:]:
+                        row_dict = dict(zip(headers, row))
+                        date_raw = row_dict.get("date") or row_dict.get("transaction date")
+                        desc = row_dict.get("description") or row_dict.get("merchant") or row_dict.get("narration")
+                        amt_raw = row_dict.get("amount") or row_dict.get("debit") or row_dict.get("credit")
 
-            # 1️⃣ Try table extraction
-            table = page.extract_table()
-            if table:
-                headers = [h.lower() if h else "" for h in table[0]]
-                for row in table[1:]:
-                    row_dict = dict(zip(headers, row))
-                    date_raw = row_dict.get("date") or row_dict.get("transaction date")
-                    desc = row_dict.get("description") or row_dict.get("merchant") or row_dict.get("narration")
-                    amt_raw = row_dict.get("amount") or row_dict.get("debit") or row_dict.get("credit")
-                    if date_raw and desc and amt_raw:
-                        amt = amt_raw.replace(",", "").replace("(", "-").replace(")", "")
-                        try:
-                            amt = float(amt)
-                            transactions.append([date_raw, desc.strip(), amt, account_name])
-                            page_txns += 1
-                        except:
-                            continue
-                st.info(f"📄 Page {page_num}: extracted {page_txns} rows from table")
-                continue  # go to next page if table worked
+                        if date_raw and desc and amt_raw:
+                            transactions.append([
+                                clean_date(date_raw),
+                                desc.strip(),
+                                clean_amount(amt_raw),
+                                account_name
+                            ])
+                    continue
 
-            # 2️⃣ Fallback to regex over text
-            text = page.extract_text()
-            if not text:
-                continue
-            lines = text.split("\n")
-            for line in lines:
-                for pattern in regex_patterns:
-                    match = re.match(pattern, line)
-                    if match:
-                        groups = match.groups()
-                        if len(groups) == 3:  # full match with date
-                            date, merchant, amount = groups
-                        elif len(groups) == 2:  # fallback match
-                            date, (merchant, amount) = "N/A", groups
-                        amt = amount.replace(",", "").replace("(", "-").replace(")", "")
-                        try:
-                            amt = float(amt)
-                            transactions.append([date, merchant.strip(), amt, account_name])
-                            page_txns += 1
-                        except:
-                            continue
-                        break
-            st.info(f"📄 Page {page_num}: extracted {page_txns} rows from text")
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        for pattern in regex_patterns:
+                            match = re.match(pattern, line)
+                            if match:
+                                date_raw, merchant, amt_raw = match.groups()
+                                transactions.append([
+                                    clean_date(date_raw),
+                                    merchant.strip(),
+                                    clean_amount(amt_raw),
+                                    account_name
+                                ])
+                                break
+                else:
+                    st.warning(f"⚠️ Page {page_num} had no extractable text.")
+    except Exception as e:
+        st.error(f"❌ PDF parsing failed: {e}")
 
-    df = pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
-    if df.empty:
-        st.warning("⚠️ No transactions extracted. Please check if the PDF is text-based and uses a supported format.")
-    return df
+    # OCR fallback
+    if not transactions:
+        try:
+            from pdf2image import convert_from_path
+            import pytesseract
 
-# Categorize expenses
+            # Save UploadedFile to temp path
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
+
+            images = convert_from_path(tmp_path)
+            for img in images:
+                text = pytesseract.image_to_string(img)
+                for line in text.split("\n"):
+                    for pattern in regex_patterns:
+                        match = re.match(pattern, line)
+                        if match:
+                            date_raw, merchant, amt_raw = match.groups()
+                            transactions.append([
+                                clean_date(date_raw),
+                                merchant.strip(),
+                                clean_amount(amt_raw),
+                                account_name
+                            ])
+                            break
+
+            uploaded_file.seek(0)  # reset after reading
+            if transactions:
+                st.info("✅ OCR was used to extract transactions from a scanned PDF.")
+        except Exception as e:
+            st.error(f"❌ OCR failed: {e}")
+
+    return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
+
+# ==============================
+# Categorize + Vendor Mapping
+# ==============================
 def categorize_expenses(df):
     df["Category"] = df["Merchant"].apply(get_category)
     return df
 
-# Add new vendor if categorized by user
 def add_new_vendor(merchant, category):
     global vendor_map
     new_row = pd.DataFrame([[merchant.lower(), category]], columns=["merchant", "category"])
@@ -106,20 +154,18 @@ def add_new_vendor(merchant, category):
     vendor_map.drop_duplicates(subset=["merchant"], keep="last", inplace=True)
     vendor_map.to_csv(VENDOR_FILE, index=False)
 
-# Expense analysis
+# ==============================
+# Analysis + Export
+# ==============================
 def analyze_expenses(df):
     st.write("💰 **Total Spent:**", df["Amount"].sum())
-
     st.write("📊 **Expense by Category**")
     st.bar_chart(df.groupby("Category")["Amount"].sum())
-
     st.write("🏦 **Top 5 Merchants**")
     st.table(df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head())
-
     st.write("🏦 **Expense by Account**")
     st.bar_chart(df.groupby("Account")["Amount"].sum())
 
-# Export
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode("utf-8")
 
@@ -132,16 +178,17 @@ def convert_df_to_excel(df):
 # ==============================
 # Streamlit UI
 # ==============================
-st.title("💳 Multi-Account Expense Analyzer")
-st.write("Upload your bank/credit card statements, categorize expenses, and compare across accounts.")
-
 uploaded_files = st.file_uploader("Upload PDF Statements", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
     all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Account"])
 
     for uploaded_file in uploaded_files:
-        account_name = st.text_input(f"Enter account name for {uploaded_file.name}", value=uploaded_file.name)
+        account_name = st.text_input(
+            f"Enter account name for {uploaded_file.name}",
+            value=uploaded_file.name,
+            key=f"account_input_{uploaded_file.name}"  # unique key fix
+        )
         if account_name:
             df = extract_transactions_from_pdf(uploaded_file, account_name)
             all_data = pd.concat([all_data, df], ignore_index=True)
@@ -149,7 +196,6 @@ if uploaded_files:
     if not all_data.empty:
         all_data = categorize_expenses(all_data)
 
-        # Filter by account
         st.subheader("🔍 Select Account for Analysis")
         account_options = ["All Accounts"] + sorted(all_data["Account"].unique().tolist())
         selected_account = st.selectbox("Choose account", account_options)
@@ -159,44 +205,38 @@ if uploaded_files:
         else:
             filtered_data = all_data
 
-        # Show raw data
         st.subheader("📑 Extracted Transactions")
         st.dataframe(filtered_data)
 
-        # Handle unknown merchants
+        # Unknown merchants
         others_df = filtered_data[filtered_data["Category"] == "Others"]
         if not others_df.empty:
             st.subheader("⚡ Assign Categories for Unknown Merchants")
             for merchant in others_df["Merchant"].unique():
                 category = st.selectbox(
                     f"Select category for {merchant}:",
-                    ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Others"],
-                    key=merchant
+                    ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Insurance", "Education", "Others"],
+                    key=f"cat_{merchant}"
                 )
                 if category != "Others":
                     add_new_vendor(merchant, category)
                     all_data.loc[all_data["Merchant"] == merchant, "Category"] = category
                     st.success(f"✅ {merchant} categorized as {category}")
 
-        # Show analysis
         st.subheader("📊 Expense Analysis")
         analyze_expenses(filtered_data)
 
-        # Export options
+        # Download buttons
         st.subheader("📥 Download Results")
-        csv_data = convert_df_to_csv(filtered_data)
-        excel_data = convert_df_to_excel(filtered_data)
-
         st.download_button(
             label="⬇️ Download as CSV",
-            data=csv_data,
+            data=convert_df_to_csv(filtered_data),
             file_name=f"expenses_{selected_account.replace(' ','_')}.csv",
             mime="text/csv"
         )
-
         st.download_button(
             label="⬇️ Download as Excel",
-            data=excel_data,
+            data=convert_df_to_excel(filtered_data),
             file_name=f"expenses_{selected_account.replace(' ','_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
