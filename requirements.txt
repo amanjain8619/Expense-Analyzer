@@ -4,5 +4,11 @@ openpyxl==3.1.2
 ofxparse==0.21
 pdfplumber==0.11.4
 matplotlib==3.9.2
-
-
+streamlit
+pandas
+openpyxl
+ofxparse
+pdfplumber
+pytesseract
+pillow
+pdf2image
