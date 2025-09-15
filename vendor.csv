@@ -1,0 +1,42 @@
+merchant,category
+swiggy,Food
+zomato,Food
+dominos,Food
+mcdonald,Food
+pizza hut,Food
+kfc,Food
+blinkit,Food
+bigbasket,Food
+grofers,Food
+amazon,Shopping
+flipkart,Shopping
+myntra,Shopping
+ajio,Shopping
+nykaa,Shopping
+croma,Shopping
+reliance digital,Shopping
+uber,Travel
+ola,Travel
+irctc,Travel
+indigo,Travel
+airindia,Travel
+makemytrip,Travel
+yatra,Travel
+goibibo,Travel
+redbus,Travel
+airtel,Utilities
+jio,Utilities
+vodafone,Utilities
+bsnl,Utilities
+tatasky,Utilities
+dishtv,Utilities
+electricity,Utilities
+water,Utilities
+gas,Utilities
+netflix,Entertainment
+spotify,Entertainment
+hotstar,Entertainment
+prime video,Entertainment
+zee5,Entertainment
+sonyliv,Entertainment
+bookmyshow,Entertainment
