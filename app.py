@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 from rapidfuzz import process
 from io import BytesIO
 from dateutil.parser import parse
-import tempfile
 
 # ==============================
 # Page config
@@ -55,7 +54,7 @@ def clean_amount(amt_str):
         return 0.0
 
 # ==============================
-# Extraction function (with OCR fallback)
+# Extraction function (without OCR)
 # ==============================
 def extract_transactions_from_pdf(uploaded_file, account_name):
     transactions = []
@@ -102,41 +101,14 @@ def extract_transactions_from_pdf(uploaded_file, account_name):
                                 break
                 else:
                     st.warning(f"⚠️ Page {page_num} had no extractable text.")
+
     except Exception as e:
         st.error(f"❌ PDF parsing failed: {e}")
 
-    # OCR fallback
+    # Skip OCR for Streamlit Cloud
     if not transactions:
-        try:
-            from pdf2image import convert_from_path
-            import pytesseract
-
-            # Save UploadedFile to temp path
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
-
-            images = convert_from_path(tmp_path)
-            for img in images:
-                text = pytesseract.image_to_string(img)
-                for line in text.split("\n"):
-                    for pattern in regex_patterns:
-                        match = re.match(pattern, line)
-                        if match:
-                            date_raw, merchant, amt_raw = match.groups()
-                            transactions.append([
-                                clean_date(date_raw),
-                                merchant.strip(),
-                                clean_amount(amt_raw),
-                                account_name
-                            ])
-                            break
-
-            uploaded_file.seek(0)  # reset after reading
-            if transactions:
-                st.info("✅ OCR was used to extract transactions from a scanned PDF.")
-        except Exception as e:
-            st.error(f"❌ OCR failed: {e}")
+        st.warning("⚠️ No transactions extracted. If this is a scanned PDF, OCR is required. "
+                   "OCR is not supported on Streamlit Cloud — please try with a text-based PDF.")
 
     return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
 
