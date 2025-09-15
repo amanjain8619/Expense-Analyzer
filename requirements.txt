@@ -12,3 +12,9 @@ pdfplumber
 pytesseract
 pillow
 pdf2image
+streamlit
+pandas
+openpyxl
+ofxparse
+pdfplumber
+matplotlib
