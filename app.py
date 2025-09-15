@@ -54,7 +54,7 @@ def clean_amount(amt_str):
         return 0.0
 
 # ==============================
-# Extraction function (only pdfplumber, no OCR)
+# Extraction function (fixed)
 # ==============================
 def extract_transactions_from_pdf(uploaded_file, account_name):
     transactions = []
@@ -66,7 +66,8 @@ def extract_transactions_from_pdf(uploaded_file, account_name):
 
     try:
         with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                # First try table extraction
                 table = page.extract_table()
                 if table:
                     headers = [h.lower() if h else "" for h in table[0]]
@@ -75,7 +76,6 @@ def extract_transactions_from_pdf(uploaded_file, account_name):
                         date_raw = row_dict.get("date") or row_dict.get("transaction date")
                         desc = row_dict.get("description") or row_dict.get("merchant") or row_dict.get("narration")
                         amt_raw = row_dict.get("amount") or row_dict.get("debit") or row_dict.get("credit")
-
                         if date_raw and desc and amt_raw:
                             transactions.append([
                                 clean_date(date_raw),
@@ -83,8 +83,9 @@ def extract_transactions_from_pdf(uploaded_file, account_name):
                                 clean_amount(amt_raw),
                                 account_name
                             ])
-                    continue
+                    continue  # skip to next page if table worked
 
+                # Fallback to text extraction
                 text = page.extract_text()
                 if text:
                     for line in text.split("\n"):
