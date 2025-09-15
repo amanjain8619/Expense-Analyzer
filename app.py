@@ -4,30 +4,32 @@ import pdfplumber
 import re
 import matplotlib.pyplot as plt
 from rapidfuzz import process
-
-st.set_page_config(page_title="Expense Analyzer", layout="wide")
-st.title("💳 Expense Analyzer")
-st.write("Upload your bank/credit card statement PDF and get smart insights!")
+from io import BytesIO
 
 # ==============================
 # Load vendor mapping
 # ==============================
-@st.cache_data
-def load_vendor_map():
-    try:
-        return pd.read_csv("vendors.csv")
-    except Exception:
-        return pd.DataFrame(columns=["merchant", "category"])
+VENDOR_FILE = "vendors.csv"
+vendor_map = pd.read_csv(VENDOR_FILE)
 
-def save_vendor_map(vendor_map):
-    vendor_map.to_csv("vendors.csv", index=False)
+# Fuzzy matching to find category
+def get_category(merchant):
+    m = merchant.lower()
+    matches = process.extractOne(
+        m,
+        vendor_map["merchant"].str.lower().tolist(),
+        score_cutoff=80
+    )
+    if matches:
+        matched_merchant = matches[0]
+        category = vendor_map.loc[
+            vendor_map["merchant"].str.lower() == matched_merchant, "category"
+        ].iloc[0]
+        return category
+    return "Others"
 
-vendor_map = load_vendor_map()
-
-# ==============================
-# Extract transactions
-# ==============================
-def extract_transactions_from_pdf(pdf_file):
+# Extract transactions from PDF
+def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
@@ -39,92 +41,116 @@ def extract_transactions_from_pdf(pdf_file):
                 match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d+\.\d{2})", line)
                 if match:
                     date, merchant, amount = match.groups()
-                    transactions.append([date, merchant.strip(), float(amount)])
-    return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount"])
+                    transactions.append([date, merchant.strip(), float(amount), account_name])
+    return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
 
-# ==============================
-# Fuzzy match category
-# ==============================
-def get_category(merchant, vendor_map):
-    merchant_lower = merchant.lower()
-    best_match = process.extractOne(
-        merchant_lower,
-        vendor_map['merchant'].str.lower().tolist(),
-        score_cutoff=80
-    )
-    if best_match:
-        category = vendor_map[vendor_map['merchant'].str.lower() == best_match[0]]['category'].iloc[0]
-        return category
-    return "Others"
-
-def categorize_expenses(df, vendor_map):
-    df["Category"] = df["Merchant"].apply(lambda m: get_category(m, vendor_map))
+# Categorize expenses
+def categorize_expenses(df):
+    df["Category"] = df["Merchant"].apply(get_category)
     return df
 
-# ==============================
+# Add new vendor if categorized by user
+def add_new_vendor(merchant, category):
+    global vendor_map
+    new_row = pd.DataFrame([[merchant.lower(), category]], columns=["merchant", "category"])
+    vendor_map = pd.concat([vendor_map, new_row], ignore_index=True)
+    vendor_map.drop_duplicates(subset=["merchant"], keep="last", inplace=True)
+    vendor_map.to_csv(VENDOR_FILE, index=False)
+
 # Expense analysis
-# ==============================
 def analyze_expenses(df):
-    st.subheader("💰 Total Spent")
-    st.write(f"₹ {df['Amount'].sum():,.2f}")
+    st.write("💰 **Total Spent:**", df["Amount"].sum())
 
-    st.subheader("📊 Expense by Category")
-    category_data = df.groupby("Category")["Amount"].sum()
-    st.dataframe(category_data)
+    st.write("📊 **Expense by Category**")
+    st.bar_chart(df.groupby("Category")["Amount"].sum())
 
-    fig, ax = plt.subplots()
-    category_data.plot(kind="bar", ax=ax, title="Expenses by Category", color="teal")
-    ax.set_ylabel("Amount (₹)")
-    st.pyplot(fig)
+    st.write("🏦 **Top 5 Merchants**")
+    st.table(df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head())
 
-    st.subheader("🏦 Top 5 Merchants")
-    st.dataframe(df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head())
+    st.write("🏦 **Expense by Account**")
+    st.bar_chart(df.groupby("Account")["Amount"].sum())
+
+# Function to export DataFrame
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+def convert_df_to_excel(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Expenses")
+    processed_data = output.getvalue()
+    return processed_data
 
 # ==============================
-# File upload
+# Streamlit UI
 # ==============================
-uploaded_file = st.file_uploader("Upload PDF Statement", type=["pdf"])
+st.title("💳 Multi-Account Expense Analyzer")
+st.write("Upload your bank/credit card statements, categorize expenses, and compare across accounts.")
 
-if uploaded_file:
-    df = extract_transactions_from_pdf(uploaded_file)
-    if not df.empty:
-        df = categorize_expenses(df, vendor_map)
+uploaded_files = st.file_uploader("Upload PDF Statements", type=["pdf"], accept_multiple_files=True)
 
-        st.subheader("📋 Transactions")
-        st.dataframe(df)
+if uploaded_files:
+    all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Account"])
 
-        analyze_expenses(df)
+    for uploaded_file in uploaded_files:
+        account_name = st.text_input(f"Enter account name for {uploaded_file.name}", value=uploaded_file.name)
+        if account_name:
+            df = extract_transactions_from_pdf(uploaded_file, account_name)
+            all_data = pd.concat([all_data, df], ignore_index=True)
 
-        # ==============================
-        # Handle "Others" → User feedback
-        # ==============================
-        st.subheader("🛠 Fix Uncategorized Merchants")
-        others_df = df[df["Category"] == "Others"]
+    if not all_data.empty:
+        all_data = categorize_expenses(all_data)
 
+        # Account Filter
+        st.subheader("🔍 Select Account for Analysis")
+        account_options = ["All Accounts"] + sorted(all_data["Account"].unique().tolist())
+        selected_account = st.selectbox("Choose account", account_options)
+
+        if selected_account != "All Accounts":
+            filtered_data = all_data[all_data["Account"] == selected_account]
+        else:
+            filtered_data = all_data
+
+        # Show raw data
+        st.subheader("📑 Extracted Transactions")
+        st.dataframe(filtered_data)
+
+        # Handle unknown merchants
+        others_df = filtered_data[filtered_data["Category"] == "Others"]
         if not others_df.empty:
-            st.write("Some merchants were not recognized. Assign categories below:")
-
-            categories = vendor_map["category"].unique().tolist()
-            new_entries = []
-
-            for _, row in others_df.iterrows():
-                merchant = row["Merchant"]
-                choice = st.selectbox(
-                    f"Select category for: {merchant}",
-                    options=["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Others"],
+            st.subheader("⚡ Assign Categories for Unknown Merchants")
+            for merchant in others_df["Merchant"].unique():
+                category = st.selectbox(
+                    f"Select category for {merchant}:",
+                    ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Others"],
                     key=merchant
                 )
-                if choice != "Others":
-                    new_entries.append({"merchant": merchant.lower(), "category": choice})
+                if category != "Others":
+                    add_new_vendor(merchant, category)
+                    all_data.loc[all_data["Merchant"] == merchant, "Category"] = category
+                    st.success(f"✅ {merchant} categorized as {category}")
 
-            if st.button("✅ Save Mappings"):
-                if new_entries:
-                    new_df = pd.DataFrame(new_entries)
-                    vendor_map = pd.concat([vendor_map, new_df]).drop_duplicates(subset=["merchant"])
-                    save_vendor_map(vendor_map)
-                    st.success("Saved! Next time these merchants will be auto-categorized.")
-                    st.rerun()
-        else:
-            st.success("✅ All merchants categorized successfully!")
-    else:
-        st.warning("⚠️ No transactions found in the uploaded PDF.")
+        # Show analysis
+        st.subheader("📊 Expense Analysis")
+        analyze_expenses(filtered_data)
+
+        # ==============================
+        # Export Options
+        # ==============================
+        st.subheader("📥 Download Results")
+        csv_data = convert_df_to_csv(filtered_data)
+        excel_data = convert_df_to_excel(filtered_data)
+
+        st.download_button(
+            label="⬇️ Download as CSV",
+            data=csv_data,
+            file_name=f"expenses_{selected_account.replace(' ','_')}.csv",
+            mime="text/csv"
+        )
+
+        st.download_button(
+            label="⬇️ Download as Excel",
+            data=excel_data,
+            file_name=f"expenses_{selected_account.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
