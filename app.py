@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from rapidfuzz import process
 from io import BytesIO
 from dateutil.parser import parse
+import tempfile
 
 # ==============================
 # Page config
@@ -56,7 +57,7 @@ def clean_amount(amt_str):
 # ==============================
 # Extraction function (with OCR fallback)
 # ==============================
-def extract_transactions_from_pdf(pdf_file, account_name):
+def extract_transactions_from_pdf(uploaded_file, account_name):
     transactions = []
     regex_patterns = [
         r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",
@@ -65,7 +66,7 @@ def extract_transactions_from_pdf(pdf_file, account_name):
     ]
 
     try:
-        with pdfplumber.open(pdf_file) as pdf:
+        with pdfplumber.open(uploaded_file) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
                 table = page.extract_table()
                 if table:
@@ -109,7 +110,13 @@ def extract_transactions_from_pdf(pdf_file, account_name):
         try:
             from pdf2image import convert_from_path
             import pytesseract
-            images = convert_from_path(pdf_file)
+
+            # Save UploadedFile to temp path
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
+
+            images = convert_from_path(tmp_path)
             for img in images:
                 text = pytesseract.image_to_string(img)
                 for line in text.split("\n"):
@@ -124,6 +131,8 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                                 account_name
                             ])
                             break
+
+            uploaded_file.seek(0)  # reset after reading
             if transactions:
                 st.info("✅ OCR was used to extract transactions from a scanned PDF.")
         except Exception as e:
@@ -175,7 +184,11 @@ if uploaded_files:
     all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Account"])
 
     for uploaded_file in uploaded_files:
-        account_name = st.text_input(f"Enter account name for {uploaded_file.name}", value=uploaded_file.name)
+        account_name = st.text_input(
+            f"Enter account name for {uploaded_file.name}",
+            value=uploaded_file.name,
+            key=f"account_input_{uploaded_file.name}"  # unique key fix
+        )
         if account_name:
             df = extract_transactions_from_pdf(uploaded_file, account_name)
             all_data = pd.concat([all_data, df], ignore_index=True)
@@ -203,7 +216,7 @@ if uploaded_files:
                 category = st.selectbox(
                     f"Select category for {merchant}:",
                     ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Insurance", "Education", "Others"],
-                    key=merchant
+                    key=f"cat_{merchant}"
                 )
                 if category != "Others":
                     add_new_vendor(merchant, category)
