@@ -28,20 +28,55 @@ def get_category(merchant):
         return category
     return "Others"
 
-# Extract transactions from PDF
+# ==============================
+# Improved PDF extraction
+# ==============================
 def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
+    regex_patterns = [
+        r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",   # dd/mm/yyyy
+        r"(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})",   # dd-mm-yyyy
+        r"([A-Za-z]{3}\s+\d{1,2},\s+\d{4})\s+(.+?)\s+(-?\d[\d,]*\.\d{2})"  # Aug 14, 2025
+    ]
+
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
+            # 1️⃣ Try table extraction
+            table = page.extract_table()
+            if table:
+                headers = [h.lower() if h else "" for h in table[0]]
+                for row in table[1:]:
+                    row_dict = dict(zip(headers, row))
+                    date_raw = row_dict.get("date") or row_dict.get("transaction date")
+                    desc = row_dict.get("description") or row_dict.get("merchant") or row_dict.get("narration")
+                    amt_raw = row_dict.get("amount") or row_dict.get("debit") or row_dict.get("credit")
+                    if date_raw and desc and amt_raw:
+                        amt = amt_raw.replace(",", "").replace("(", "-").replace(")", "")
+                        try:
+                            amt = float(amt)
+                        except:
+                            continue
+                        transactions.append([date_raw, desc.strip(), amt, account_name])
+                continue  # go to next page if table worked
+
+            # 2️⃣ Fallback to regex over text
             text = page.extract_text()
             if not text:
                 continue
             lines = text.split("\n")
             for line in lines:
-                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d+\.\d{2})", line)
-                if match:
-                    date, merchant, amount = match.groups()
-                    transactions.append([date, merchant.strip(), float(amount), account_name])
+                for pattern in regex_patterns:
+                    match = re.match(pattern, line)
+                    if match:
+                        date, merchant, amount = match.groups()
+                        amt = amount.replace(",", "").replace("(", "-").replace(")", "")
+                        try:
+                            amt = float(amt)
+                        except:
+                            continue
+                        transactions.append([date, merchant.strip(), amt, account_name])
+                        break
+
     return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
 
 # Categorize expenses
@@ -70,7 +105,7 @@ def analyze_expenses(df):
     st.write("🏦 **Expense by Account**")
     st.bar_chart(df.groupby("Account")["Amount"].sum())
 
-# Function to export DataFrame
+# Export
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode("utf-8")
 
@@ -78,8 +113,7 @@ def convert_df_to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Expenses")
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # ==============================
 # Streamlit UI
@@ -101,7 +135,7 @@ if uploaded_files:
     if not all_data.empty:
         all_data = categorize_expenses(all_data)
 
-        # Account Filter
+        # Filter by account
         st.subheader("🔍 Select Account for Analysis")
         account_options = ["All Accounts"] + sorted(all_data["Account"].unique().tolist())
         selected_account = st.selectbox("Choose account", account_options)
@@ -134,9 +168,7 @@ if uploaded_files:
         st.subheader("📊 Expense Analysis")
         analyze_expenses(filtered_data)
 
-        # ==============================
-        # Export Options
-        # ==============================
+        # Export options
         st.subheader("📥 Download Results")
         csv_data = convert_df_to_csv(filtered_data)
         excel_data = convert_df_to_excel(filtered_data)
