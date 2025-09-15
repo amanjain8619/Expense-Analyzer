@@ -5,3 +5,4 @@ ofxparse
 pdfplumber
 pillow
 matplotlib
+rapidfuzz
