@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import re
-import matplotlib.pyplot as plt
 from rapidfuzz import process
 from io import BytesIO
 
@@ -12,7 +11,9 @@ from io import BytesIO
 VENDOR_FILE = "vendors.csv"
 vendor_map = pd.read_csv(VENDOR_FILE)
 
+# ------------------------------
 # Fuzzy matching to find category
+# ------------------------------
 def get_category(merchant):
     m = merchant.lower()
     matches = process.extractOne(
@@ -28,28 +29,64 @@ def get_category(merchant):
         return category
     return "Others"
 
+# ------------------------------
 # Extract transactions from PDF
+# ------------------------------
 def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
     with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text()
             if not text:
                 continue
-            lines = text.split("\n")
-            for line in lines:
-                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+(-?\d+\.\d{2})", line)
-                if match:
-                    date, merchant, amount = match.groups()
-                    transactions.append([date, merchant.strip(), float(amount), account_name])
-    return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
 
+            dates, merchants, amounts, drcr_flags = [], [], [], []
+
+            for line in lines:
+                # 1️⃣ Capture dates
+                if re.match(r"\d{2}/\d{2}/\d{4}", line):
+                    dates.append(line)
+
+                # 2️⃣ Capture amounts (with DR/CR or INR prefix)
+                elif re.search(r"[\d,]+\.\d{2}\s?(DR|CR)?$", line) or re.match(r"INR\s*[\d,]+\.\d{2}", line):
+                    drcr = "DR" if "DR" in line else ("CR" if "CR" in line else "")
+                    amt = re.sub(r"[^\d\.\-]", "", line)  # remove INR, DR/CR, commas
+                    try:
+                        amounts.append(float(amt))
+                        drcr_flags.append(drcr)
+                    except:
+                        continue
+
+                # 3️⃣ Everything else = merchant description
+                else:
+                    merchants.append(line)
+
+            # 4️⃣ Align lists
+            n = min(len(dates), len(merchants), len(amounts))
+            for i in range(n):
+                transactions.append([
+                    dates[i],
+                    merchants[i],
+                    amounts[i] if drcr_flags[i] != "CR" else -amounts[i],  # negate CR
+                    drcr_flags[i] if i < len(drcr_flags) else "",
+                    account_name
+                ])
+
+            st.info(f"📄 Page {page_num}: extracted {n} rows")
+
+    return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Type", "Account"])
+
+# ------------------------------
 # Categorize expenses
+# ------------------------------
 def categorize_expenses(df):
     df["Category"] = df["Merchant"].apply(get_category)
     return df
 
+# ------------------------------
 # Add new vendor if categorized by user
+# ------------------------------
 def add_new_vendor(merchant, category):
     global vendor_map
     new_row = pd.DataFrame([[merchant.lower(), category]], columns=["merchant", "category"])
@@ -57,7 +94,9 @@ def add_new_vendor(merchant, category):
     vendor_map.drop_duplicates(subset=["merchant"], keep="last", inplace=True)
     vendor_map.to_csv(VENDOR_FILE, index=False)
 
+# ------------------------------
 # Expense analysis
+# ------------------------------
 def analyze_expenses(df):
     st.write("💰 **Total Spent:**", df["Amount"].sum())
 
@@ -70,7 +109,9 @@ def analyze_expenses(df):
     st.write("🏦 **Expense by Account**")
     st.bar_chart(df.groupby("Account")["Amount"].sum())
 
-# Function to export DataFrame
+# ------------------------------
+# Export Helpers
+# ------------------------------
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode("utf-8")
 
@@ -90,7 +131,7 @@ st.write("Upload your bank/credit card statements, categorize expenses, and comp
 uploaded_files = st.file_uploader("Upload PDF Statements", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
-    all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Account"])
+    all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Type", "Account"])
 
     for uploaded_file in uploaded_files:
         account_name = st.text_input(f"Enter account name for {uploaded_file.name}", value=uploaded_file.name)
