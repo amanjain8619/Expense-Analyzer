@@ -54,6 +54,9 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                     else:
                         amount = abs(amount)   # DR means debit (spend)
 
+                    # round to 2 decimals
+                    amount = round(amount, 2)
+
                     transactions.append([date, merchant.strip(), amount, account_name])
 
     return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
@@ -79,27 +82,35 @@ def add_new_vendor(merchant, category):
 # Expense analysis
 # ------------------------------
 def analyze_expenses(df):
-    st.write("💰 **Total Spent:**", df["Amount"].sum())
+    total_spent = df["Amount"].sum()
+    st.write("💰 **Total Spent:** ₹{:.2f}".format(total_spent))
 
     st.write("📊 **Expense by Category**")
-    st.bar_chart(df.groupby("Category")["Amount"].sum())
+    category_summary = df.groupby("Category")["Amount"].sum().round(2)
+    st.bar_chart(category_summary)
 
     st.write("🏦 **Top 5 Merchants**")
-    st.table(df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head())
+    merchant_summary = df.groupby("Merchant")["Amount"].sum().round(2).sort_values(ascending=False).head()
+    st.table(merchant_summary)
 
     st.write("🏦 **Expense by Account**")
-    st.bar_chart(df.groupby("Account")["Amount"].sum())
+    account_summary = df.groupby("Account")["Amount"].sum().round(2)
+    st.bar_chart(account_summary)
 
 # ------------------------------
 # Export functions
 # ------------------------------
 def convert_df_to_csv(df):
+    df = df.copy()
+    df["Amount"] = df["Amount"].round(2)  # ensure 2 decimals in export
     return df.to_csv(index=False).encode("utf-8")
 
 def convert_df_to_excel(df):
+    df = df.copy()
+    df["Amount"] = df["Amount"].round(2)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Expenses")
+        df.to_excel(writer, index=False, sheet_name="Expenses", float_format="%.2f")
     processed_data = output.getvalue()
     return processed_data
 
@@ -135,6 +146,7 @@ if uploaded_files:
 
         # Show raw data
         st.subheader("📑 Extracted Transactions")
+        filtered_data["Amount"] = filtered_data["Amount"].round(2)
         st.dataframe(filtered_data)
 
         # Handle unknown merchants
