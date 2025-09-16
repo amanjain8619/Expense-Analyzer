@@ -13,7 +13,7 @@ VENDOR_FILE = "vendors.csv"
 vendor_map = pd.read_csv(VENDOR_FILE)
 
 # ------------------------------
-# Fuzzy matching for category
+# Helper: Fuzzy category matcher
 # ------------------------------
 def get_category(merchant):
     m = merchant.lower()
@@ -31,35 +31,71 @@ def get_category(merchant):
     return "Others"
 
 # ------------------------------
+# Clean Amounts (handles CR/DR)
+# ------------------------------
+def clean_amount(text):
+    if not text:
+        return None
+    text = text.replace(",", "").strip()
+    sign = -1 if "CR" in text else 1   # Treat CR as negative
+    text = text.replace("CR", "").replace("DR", "").strip()
+    try:
+        return round(float(text) * sign, 2)
+    except ValueError:
+        return None
+
+# ------------------------------
 # Extract transactions from PDF
 # ------------------------------
 def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
     with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text()
             if not text:
                 continue
             lines = text.split("\n")
-
             for line in lines:
-                # Example: 14/08/2025 AMAZON 1234.56 CR
-                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2}\s*(CR|DR)?)", line, re.IGNORECASE)
+                # Match typical formats like "14/08/2025 ... 1,152.42 CR"
+                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2}\s*(CR|DR)?)$", line)
                 if match:
-                    date, merchant, amount_text, crdr = match.groups()
-                    # clean amount
-                    amount = float(amount_text.replace("CR", "").replace("DR", "").replace(",", "").strip())
-                    if "CR" in amount_text.upper():
-                        amount = -abs(amount)  # CR means credit (reduce spend)
-                    else:
-                        amount = abs(amount)   # DR means debit (spend)
-
-                    # round to 2 decimals
-                    amount = round(amount, 2)
-
-                    transactions.append([date, merchant.strip(), amount, account_name])
-
+                    date, merchant, amount_text, _ = match.groups()
+                    amount = clean_amount(amount_text)
+                    if amount is not None:
+                        transactions.append([date, merchant.strip(), amount, account_name])
     return pd.DataFrame(transactions, columns=["Date", "Merchant", "Amount", "Account"])
+
+# ------------------------------
+# Extract transactions from CSV/XLSX
+# ------------------------------
+def extract_transactions_from_csv_xlsx(file, account_name):
+    try:
+        if file.name.endswith(".csv"):
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
+    except Exception:
+        st.error("⚠️ Could not read this file. Please upload a valid CSV/XLSX.")
+        return pd.DataFrame()
+
+    df.columns = [c.lower() for c in df.columns]
+
+    # Try to detect columns
+    date_col = next((c for c in df.columns if "date" in c), None)
+    desc_col = next((c for c in df.columns if "desc" in c or "narration" in c or "merchant" in c), None)
+    amt_col = next((c for c in df.columns if "amount" in c or "debit" in c or "credit" in c), None)
+
+    if not all([date_col, desc_col, amt_col]):
+        st.error("⚠️ Could not detect date/description/amount columns in this file.")
+        return pd.DataFrame()
+
+    txns = df[[date_col, desc_col, amt_col]].copy()
+    txns.columns = ["Date", "Merchant", "Amount"]
+
+    # Clean & round
+    txns["Amount"] = txns["Amount"].apply(lambda x: round(float(str(x).replace(",", "")), 2))
+    txns["Account"] = account_name
+    return txns
 
 # ------------------------------
 # Categorize expenses
@@ -69,7 +105,7 @@ def categorize_expenses(df):
     return df
 
 # ------------------------------
-# Add new vendor interactively
+# Add new vendor if user assigns
 # ------------------------------
 def add_new_vendor(merchant, category):
     global vendor_map
@@ -82,45 +118,37 @@ def add_new_vendor(merchant, category):
 # Expense analysis
 # ------------------------------
 def analyze_expenses(df):
-    total_spent = df["Amount"].sum()
-    st.write("💰 **Total Spent:** ₹{:.2f}".format(total_spent))
+    st.write("💰 **Total Spent:** ₹{:.2f}".format(df["Amount"].sum()))
 
     st.write("📊 **Expense by Category**")
-    category_summary = df.groupby("Category")["Amount"].sum().round(2)
-    st.bar_chart(category_summary)
+    st.bar_chart(df.groupby("Category")["Amount"].sum().round(2))
 
     st.write("🏦 **Top 5 Merchants**")
-    merchant_summary = df.groupby("Merchant")["Amount"].sum().round(2).sort_values(ascending=False).head()
-    st.table(merchant_summary)
+    top_merchants = df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head().round(2)
+    st.table(top_merchants)
 
     st.write("🏦 **Expense by Account**")
-    account_summary = df.groupby("Account")["Amount"].sum().round(2)
-    st.bar_chart(account_summary)
+    st.bar_chart(df.groupby("Account")["Amount"].sum().round(2))
 
 # ------------------------------
-# Export functions
+# Export helpers
 # ------------------------------
 def convert_df_to_csv(df):
-    df = df.copy()
-    df["Amount"] = df["Amount"].round(2)  # ensure 2 decimals in export
-    return df.to_csv(index=False).encode("utf-8")
+    return df.to_csv(index=False, float_format="%.2f").encode("utf-8")
 
 def convert_df_to_excel(df):
-    df = df.copy()
-    df["Amount"] = df["Amount"].round(2)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Expenses", float_format="%.2f")
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # ==============================
 # Streamlit UI
 # ==============================
 st.title("💳 Multi-Account Expense Analyzer")
-st.write("Upload your bank/credit card statements, categorize expenses, and compare across accounts.")
+st.write("Upload your bank/credit card statements (PDF/CSV/XLSX), categorize expenses, and compare across accounts.")
 
-uploaded_files = st.file_uploader("Upload PDF Statements", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Statements", type=["pdf", "csv", "xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
     all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Account"])
@@ -128,7 +156,11 @@ if uploaded_files:
     for uploaded_file in uploaded_files:
         account_name = st.text_input(f"Enter account name for {uploaded_file.name}", value=uploaded_file.name)
         if account_name:
-            df = extract_transactions_from_pdf(uploaded_file, account_name)
+            if uploaded_file.name.endswith(".pdf"):
+                df = extract_transactions_from_pdf(uploaded_file, account_name)
+            else:
+                df = extract_transactions_from_csv_xlsx(uploaded_file, account_name)
+
             all_data = pd.concat([all_data, df], ignore_index=True)
 
     if not all_data.empty:
@@ -146,8 +178,7 @@ if uploaded_files:
 
         # Show raw data
         st.subheader("📑 Extracted Transactions")
-        filtered_data["Amount"] = filtered_data["Amount"].round(2)
-        st.dataframe(filtered_data)
+        st.dataframe(filtered_data.style.format({"Amount": "{:.2f}"}))
 
         # Handle unknown merchants
         others_df = filtered_data[filtered_data["Category"] == "Others"]
@@ -156,7 +187,7 @@ if uploaded_files:
             for merchant in others_df["Merchant"].unique():
                 category = st.selectbox(
                     f"Select category for {merchant}:",
-                    ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Others"],
+                    ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Healthcare", "Education", "Others"],
                     key=merchant
                 )
                 if category != "Others":
@@ -168,9 +199,7 @@ if uploaded_files:
         st.subheader("📊 Expense Analysis")
         analyze_expenses(filtered_data)
 
-        # ==============================
-        # Export Options
-        # ==============================
+        # Export
         st.subheader("📥 Download Results")
         csv_data = convert_df_to_csv(filtered_data)
         excel_data = convert_df_to_excel(filtered_data)
