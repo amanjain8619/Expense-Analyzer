@@ -4,8 +4,8 @@ import pdfplumber
 import re
 from rapidfuzz import process
 from io import BytesIO
-import os
 from datetime import datetime
+import os
 
 # ==============================
 # Load vendor mapping
@@ -16,19 +16,6 @@ if os.path.exists(VENDOR_FILE):
 else:
     vendor_map = pd.DataFrame(columns=["merchant", "category"])
     vendor_map.to_csv(VENDOR_FILE, index=False)
-
-# ------------------------------
-# Helpers
-# ------------------------------
-def parse_date(date_str):
-    """Handle both dd/mm/yyyy and 'Month DD' formats."""
-    try:
-        return datetime.strptime(date_str, "%d/%m/%Y").strftime("%d/%m/%Y")
-    except:
-        try:
-            return datetime.strptime(date_str + " 2025", "%b %d %Y").strftime("%d/%m/%Y")
-        except:
-            return date_str  # fallback
 
 # ------------------------------
 # Fuzzy matching to find category
@@ -49,10 +36,25 @@ def get_category(merchant):
     return "Others"
 
 # ------------------------------
-# Extract transactions from PDF (HDFC, BoB, ICICI, AMEX)
+# Date Parser
+# ------------------------------
+def parse_date(date_str):
+    """Handle dd/mm/yyyy and Month DD formats."""
+    try:
+        return datetime.strptime(date_str, "%d/%m/%Y").strftime("%d/%m/%Y")
+    except:
+        try:
+            return datetime.strptime(date_str + " 2025", "%b %d %Y").strftime("%d/%m/%Y")
+        except:
+            return date_str
+
+# ------------------------------
+# Extract transactions from PDF (supports HDFC/ICICI/BoB + AMEX)
 # ------------------------------
 def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
+    pending_merchant = None  # buffer for split lines
+
     with pdfplumber.open(pdf_file) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text()
@@ -60,29 +62,57 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                 continue
             lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-            for i, line in enumerate(lines):
-                # --- Standard HDFC/ICICI/BoB regex ---
-                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\s?(CR|DR)?", line)
-                if match:
-                    date, merchant, amount, drcr = match.groups()
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+
+                # --- Standard HDFC/ICICI/BoB style ---
+                m = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\s?(CR|DR)?", line)
+                if m:
+                    date, merchant, amount, drcr = m.groups()
                     amt = float(amount.replace(",", ""))
                     if drcr == "CR":
                         amt = -amt
                     transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr if drcr else "DR", account_name])
+                    i += 1
                     continue
 
-                # --- AMEX style: "July 01 MERCHANT 123.45" ---
-                amex_match = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})$", line)
-                if amex_match:
-                    date, merchant, amount = amex_match.groups()
+                # --- AMEX style inline ---
+                m2 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})(?:\s?(CR|DR))?$", line)
+                if m2:
+                    date, merchant, amount, drcr = m2.groups()
                     amt = float(amount.replace(",", ""))
-                    drcr = "DR"
-                    # look ahead for CR marker in next line
-                    if i+1 < len(lines) and lines[i+1].strip().endswith("CR"):
+                    if drcr and drcr.upper() == "CR":
                         amt = -amt
-                        drcr = "CR"
+                    else:
+                        if i+1 < len(lines) and lines[i+1].strip().endswith("CR"):
+                            amt = -amt
+                            drcr = "CR"
+                            i += 1
+                        else:
+                            drcr = "DR"
                     transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr, account_name])
+                    i += 1
                     continue
+
+                # --- AMEX Split Line (merchant without amount) ---
+                m3 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+)$", line)
+                if m3 and not re.search(r"[\d,]+\.\d{2}", line):
+                    pending_date, pending_merchant = m3.groups()
+                    if i+1 < len(lines):
+                        next_line = lines[i+1]
+                        amt_match = re.match(r"([\d,]+\.\d{2})(?:\s?(CR|DR))?$", next_line)
+                        if amt_match:
+                            amount, drcr = amt_match.groups()
+                            amt = float(amount.replace(",", ""))
+                            if drcr and drcr.upper() == "CR":
+                                amt = -amt
+                            else:
+                                drcr = "DR"
+                            transactions.append([parse_date(pending_date), pending_merchant.strip(), round(amt, 2), drcr, account_name])
+                            i += 2
+                            continue
+                i += 1
 
             st.info(f"📄 Page {page_num}: extracted {len(transactions)} rows so far")
 
@@ -125,7 +155,7 @@ def normalize_dataframe(df, account_name):
         df["Amount"] = df["Debit"].fillna(0) - df["Credit"].fillna(0)
         df["Type"] = df.apply(lambda x: "DR" if x["Debit"] > 0 else "CR", axis=1)
     elif "Amount" in df and "Type" in df:
-        df["Amount"] = df.apply(lambda x: -abs(x["Amount"]) if str(x["Type"]).upper() == "CR" else abs(x["Amount"]), axis=1)
+        df["Amount"] = df.apply(lambda x: -abs(x["Amount"]) if str(x["Type"]).upper().startswith("CR") else abs(x["Amount"]), axis=1)
     elif "Amount" in df and "Type" not in df:
         df["Type"] = "DR"
 
@@ -133,6 +163,7 @@ def normalize_dataframe(df, account_name):
         st.error("❌ Could not detect required columns (Date, Merchant, Amount). Please check your file.")
         return pd.DataFrame(columns=["Date", "Merchant", "Amount", "Type", "Account"])
 
+    df["Amount"] = df["Amount"].astype(float).round(2)
     df["Account"] = account_name
     return df[["Date", "Merchant", "Amount", "Type", "Account"]]
 
@@ -157,25 +188,34 @@ def add_new_vendor(merchant, category):
 # Expense analysis
 # ------------------------------
 def analyze_expenses(df):
-    st.write("💰 **Total Spent:**", df["Amount"].sum())
+    st.write("💰 **Total Spent:**", f"{df['Amount'].sum():,.2f}")
+
     st.write("📊 **Expense by Category**")
-    st.bar_chart(df.groupby("Category")["Amount"].sum())
+    cat_data = df.groupby("Category")["Amount"].sum().round(2)
+    st.bar_chart(cat_data)
+
     st.write("🏦 **Top 5 Merchants**")
-    st.table(df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head())
+    top_merchants = df.groupby("Merchant")["Amount"].sum().round(2).sort_values(ascending=False).head()
+    st.dataframe(top_merchants.apply(lambda x: f"{x:,.2f}"))
+
     st.write("🏦 **Expense by Account**")
-    st.bar_chart(df.groupby("Account")["Amount"].sum())
+    acc_data = df.groupby("Account")["Amount"].sum().round(2)
+    st.bar_chart(acc_data)
 
 # ------------------------------
 # Export Helpers
 # ------------------------------
 def convert_df_to_csv(df):
+    df["Amount"] = df["Amount"].round(2)
     return df.to_csv(index=False).encode("utf-8")
 
 def convert_df_to_excel(df):
+    df["Amount"] = df["Amount"].round(2)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Expenses")
-    return output.getvalue()
+        df.to_excel(writer, index=False, sheet_name="Expenses", float_format="%.2f")
+    processed_data = output.getvalue()
+    return processed_data
 
 # ==============================
 # Streamlit UI
@@ -209,8 +249,8 @@ if uploaded_files:
 
     if not all_data.empty:
         all_data = categorize_expenses(all_data)
+        all_data["Amount"] = all_data["Amount"].round(2)
 
-        # Account Filter
         st.subheader("🔍 Select Account for Analysis")
         account_options = ["All Accounts"] + sorted(all_data["Account"].unique().tolist())
         selected_account = st.selectbox("Choose account", account_options)
@@ -221,9 +261,8 @@ if uploaded_files:
             filtered_data = all_data
 
         st.subheader("📑 Extracted Transactions")
-        st.dataframe(filtered_data)
+        st.dataframe(filtered_data.style.format({"Amount": "{:,.2f}"}))
 
-        # Handle unknown merchants
         others_df = filtered_data[filtered_data["Category"] == "Others"]
         if not others_df.empty:
             st.subheader("⚡ Assign Categories for Unknown Merchants")
@@ -251,6 +290,7 @@ if uploaded_files:
             file_name=f"expenses_{selected_account.replace(' ','_')}.csv",
             mime="text/csv"
         )
+
         st.download_button(
             label="⬇️ Download as Excel",
             data=excel_data,
