@@ -46,15 +46,16 @@ def parse_date(date_str):
         try:
             return datetime.strptime(date_str + " 2025", "%b %d %Y").strftime("%d/%m/%Y")
         except:
-            return date_str
+            try:
+                return datetime.strptime(date_str + " 2025", "%B %d %Y").strftime("%d/%m/%Y")
+            except:
+                return date_str
 
 # ------------------------------
 # Extract transactions from PDF (supports HDFC/ICICI/BoB + AMEX)
 # ------------------------------
 def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
-    pending_merchant = None  # buffer for split lines
-
     with pdfplumber.open(pdf_file) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text()
@@ -77,41 +78,23 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                     i += 1
                     continue
 
-                # --- AMEX style inline ---
-                m2 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})(?:\s?(CR|DR))?$", line)
+                # --- AMEX style: "July 01 MERCHANT 123.45" ---
+                m2 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})$", line)
                 if m2:
-                    date, merchant, amount, drcr = m2.groups()
+                    date, merchant, amount = m2.groups()
                     amt = float(amount.replace(",", ""))
-                    if drcr and drcr.upper() == "CR":
+                    drcr = "DR"
+
+                    # Look ahead: if next line is just CR
+                    if i+1 < len(lines) and lines[i+1].strip().upper() == "CR":
                         amt = -amt
-                    else:
-                        if i+1 < len(lines) and lines[i+1].strip().endswith("CR"):
-                            amt = -amt
-                            drcr = "CR"
-                            i += 1
-                        else:
-                            drcr = "DR"
+                        drcr = "CR"
+                        i += 1  # skip the CR line
+
                     transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr, account_name])
                     i += 1
                     continue
 
-                # --- AMEX Split Line (merchant without amount) ---
-                m3 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+)$", line)
-                if m3 and not re.search(r"[\d,]+\.\d{2}", line):
-                    pending_date, pending_merchant = m3.groups()
-                    if i+1 < len(lines):
-                        next_line = lines[i+1]
-                        amt_match = re.match(r"([\d,]+\.\d{2})(?:\s?(CR|DR))?$", next_line)
-                        if amt_match:
-                            amount, drcr = amt_match.groups()
-                            amt = float(amount.replace(",", ""))
-                            if drcr and drcr.upper() == "CR":
-                                amt = -amt
-                            else:
-                                drcr = "DR"
-                            transactions.append([parse_date(pending_date), pending_merchant.strip(), round(amt, 2), drcr, account_name])
-                            i += 2
-                            continue
                 i += 1
 
             st.info(f"📄 Page {page_num}: extracted {len(transactions)} rows so far")
