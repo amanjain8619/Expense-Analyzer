@@ -4,12 +4,31 @@ import pdfplumber
 import re
 from rapidfuzz import process
 from io import BytesIO
+import os
+from datetime import datetime
 
 # ==============================
 # Load vendor mapping
 # ==============================
 VENDOR_FILE = "vendors.csv"
-vendor_map = pd.read_csv(VENDOR_FILE)
+if os.path.exists(VENDOR_FILE):
+    vendor_map = pd.read_csv(VENDOR_FILE)
+else:
+    vendor_map = pd.DataFrame(columns=["merchant", "category"])
+    vendor_map.to_csv(VENDOR_FILE, index=False)
+
+# ------------------------------
+# Helpers
+# ------------------------------
+def parse_date(date_str):
+    """Handle both dd/mm/yyyy and 'Month DD' formats."""
+    try:
+        return datetime.strptime(date_str, "%d/%m/%Y").strftime("%d/%m/%Y")
+    except:
+        try:
+            return datetime.strptime(date_str + " 2025", "%b %d %Y").strftime("%d/%m/%Y")
+        except:
+            return date_str  # fallback
 
 # ------------------------------
 # Fuzzy matching to find category
@@ -30,7 +49,7 @@ def get_category(merchant):
     return "Others"
 
 # ------------------------------
-# Extract transactions from PDF (text-based only)
+# Extract transactions from PDF (HDFC, BoB, ICICI, AMEX)
 # ------------------------------
 def extract_transactions_from_pdf(pdf_file, account_name):
     transactions = []
@@ -41,15 +60,29 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                 continue
             lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-            for line in lines:
-                # Example: 15/08/2025   AMAZON INDIA   1,234.56 DR
-                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\s?(DR|CR)?", line)
+            for i, line in enumerate(lines):
+                # --- Standard HDFC/ICICI/BoB regex ---
+                match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\s?(CR|DR)?", line)
                 if match:
                     date, merchant, amount, drcr = match.groups()
                     amt = float(amount.replace(",", ""))
                     if drcr == "CR":
                         amt = -amt
-                    transactions.append([date, merchant.strip(), amt, drcr if drcr else "DR", account_name])
+                    transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr if drcr else "DR", account_name])
+                    continue
+
+                # --- AMEX style: "July 01 MERCHANT 123.45" ---
+                amex_match = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})$", line)
+                if amex_match:
+                    date, merchant, amount = amex_match.groups()
+                    amt = float(amount.replace(",", ""))
+                    drcr = "DR"
+                    # look ahead for CR marker in next line
+                    if i+1 < len(lines) and lines[i+1].strip().endswith("CR"):
+                        amt = -amt
+                        drcr = "CR"
+                    transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr, account_name])
+                    continue
 
             st.info(f"📄 Page {page_num}: extracted {len(transactions)} rows so far")
 
@@ -67,7 +100,6 @@ def extract_transactions_from_csv(file, account_name):
     return normalize_dataframe(df, account_name)
 
 def normalize_dataframe(df, account_name):
-    # Try to map common column names
     col_map = {
         "date": "Date",
         "transaction date": "Date",
@@ -97,7 +129,6 @@ def normalize_dataframe(df, account_name):
     elif "Amount" in df and "Type" not in df:
         df["Type"] = "DR"
 
-    # Ensure required columns
     if "Date" not in df or "Merchant" not in df or "Amount" not in df:
         st.error("❌ Could not detect required columns (Date, Merchant, Amount). Please check your file.")
         return pd.DataFrame(columns=["Date", "Merchant", "Amount", "Type", "Account"])
@@ -127,13 +158,10 @@ def add_new_vendor(merchant, category):
 # ------------------------------
 def analyze_expenses(df):
     st.write("💰 **Total Spent:**", df["Amount"].sum())
-
     st.write("📊 **Expense by Category**")
     st.bar_chart(df.groupby("Category")["Amount"].sum())
-
     st.write("🏦 **Top 5 Merchants**")
     st.table(df.groupby("Merchant")["Amount"].sum().sort_values(ascending=False).head())
-
     st.write("🏦 **Expense by Account**")
     st.bar_chart(df.groupby("Account")["Amount"].sum())
 
@@ -147,8 +175,7 @@ def convert_df_to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Expenses")
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # ==============================
 # Streamlit UI
@@ -193,7 +220,6 @@ if uploaded_files:
         else:
             filtered_data = all_data
 
-        # Show raw data
         st.subheader("📑 Extracted Transactions")
         st.dataframe(filtered_data)
 
@@ -212,11 +238,9 @@ if uploaded_files:
                     all_data.loc[all_data["Merchant"] == merchant, "Category"] = category
                     st.success(f"✅ {merchant} categorized as {category}")
 
-        # Show analysis
         st.subheader("📊 Expense Analysis")
         analyze_expenses(filtered_data)
 
-        # Export Options
         st.subheader("📥 Download Results")
         csv_data = convert_df_to_csv(filtered_data)
         excel_data = convert_df_to_excel(filtered_data)
@@ -227,7 +251,6 @@ if uploaded_files:
             file_name=f"expenses_{selected_account.replace(' ','_')}.csv",
             mime="text/csv"
         )
-
         st.download_button(
             label="⬇️ Download as Excel",
             data=excel_data,
