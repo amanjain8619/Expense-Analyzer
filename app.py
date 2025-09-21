@@ -52,13 +52,24 @@ def parse_date(date_str):
                 return date_str
 
 # ------------------------------
-# Extract transactions from PDF (supports HDFC/ICICI/BoB + AMEX)
+# Extract transactions from PDF (supports HDFC/ICICI/BoB + AMEX WIP)
 # ------------------------------
-def extract_transactions_from_pdf(pdf_file, account_name):
+def extract_transactions_from_pdf(pdf_file, account_name, debug=False):
     transactions = []
     with pdfplumber.open(pdf_file) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
+            table = page.extract_table()
+            if debug and table:
+                st.write(f"🔎 Debug Table Page {page_num}", table[:10])  # show first 10 rows
+
+            if table:
+                # TODO: Write AMEX table parser once we see structure
+                pass
+
             text = page.extract_text()
+            if debug and text:
+                st.write(f"🔎 Debug Text Page {page_num}", text.split("\n")[:20])  # show first 20 lines
+
             if not text:
                 continue
             lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -78,19 +89,16 @@ def extract_transactions_from_pdf(pdf_file, account_name):
                     i += 1
                     continue
 
-                # --- AMEX style: "July 01 MERCHANT 123.45" ---
+                # --- AMEX style: "July 01 MERCHANT 123.45" (WIP) ---
                 m2 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})$", line)
                 if m2:
                     date, merchant, amount = m2.groups()
                     amt = float(amount.replace(",", ""))
                     drcr = "DR"
-
-                    # Look ahead: if next line is just CR
                     if i+1 < len(lines) and lines[i+1].strip().upper() == "CR":
                         amt = -amt
                         drcr = "CR"
-                        i += 1  # skip the CR line
-
+                        i += 1
                     transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr, account_name])
                     i += 1
                     continue
@@ -133,7 +141,6 @@ def normalize_dataframe(df, account_name):
 
     df = df.rename(columns=df_renamed)
 
-    # Handle Debit/Credit vs Amount
     if "Debit" in df and "Credit" in df:
         df["Amount"] = df["Debit"].fillna(0) - df["Credit"].fillna(0)
         df["Type"] = df.apply(lambda x: "DR" if x["Debit"] > 0 else "CR", axis=1)
@@ -172,18 +179,12 @@ def add_new_vendor(merchant, category):
 # ------------------------------
 def analyze_expenses(df):
     st.write("💰 **Total Spent:**", f"{df['Amount'].sum():,.2f}")
-
     st.write("📊 **Expense by Category**")
-    cat_data = df.groupby("Category")["Amount"].sum().round(2)
-    st.bar_chart(cat_data)
-
+    st.bar_chart(df.groupby("Category")["Amount"].sum().round(2))
     st.write("🏦 **Top 5 Merchants**")
-    top_merchants = df.groupby("Merchant")["Amount"].sum().round(2).sort_values(ascending=False).head()
-    st.dataframe(top_merchants.apply(lambda x: f"{x:,.2f}"))
-
+    st.dataframe(df.groupby("Merchant")["Amount"].sum().round(2).sort_values(ascending=False).head())
     st.write("🏦 **Expense by Account**")
-    acc_data = df.groupby("Account")["Amount"].sum().round(2)
-    st.bar_chart(acc_data)
+    st.bar_chart(df.groupby("Account")["Amount"].sum().round(2))
 
 # ------------------------------
 # Export Helpers
@@ -197,86 +198,45 @@ def convert_df_to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Expenses", float_format="%.2f")
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # ==============================
 # Streamlit UI
 # ==============================
 st.title("💳 Multi-Account Expense Analyzer")
-st.write("Upload your bank/credit card statements (PDF, CSV, or Excel), categorize expenses, and compare across accounts.")
+st.write("Upload your bank/credit card statements (PDF, CSV, or Excel).")
 
-uploaded_files = st.file_uploader(
-    "Upload Statements",
-    type=["pdf", "csv", "xlsx"],
-    accept_multiple_files=True
-)
+debug_mode = st.checkbox("Enable Debug Mode 🔎", value=False)
+
+uploaded_files = st.file_uploader("Upload Statements", type=["pdf", "csv", "xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
     all_data = pd.DataFrame(columns=["Date", "Merchant", "Amount", "Type", "Account"])
 
     for uploaded_file in uploaded_files:
         account_name = st.text_input(f"Enter account name for {uploaded_file.name}", value=uploaded_file.name)
-
         if account_name:
             if uploaded_file.name.endswith(".pdf"):
-                df = extract_transactions_from_pdf(uploaded_file, account_name)
+                df = extract_transactions_from_pdf(uploaded_file, account_name, debug=debug_mode)
             elif uploaded_file.name.endswith(".csv"):
                 df = extract_transactions_from_csv(uploaded_file, account_name)
             elif uploaded_file.name.endswith(".xlsx"):
                 df = extract_transactions_from_excel(uploaded_file, account_name)
             else:
                 df = pd.DataFrame()
-
             all_data = pd.concat([all_data, df], ignore_index=True)
 
     if not all_data.empty:
         all_data = categorize_expenses(all_data)
         all_data["Amount"] = all_data["Amount"].round(2)
 
-        st.subheader("🔍 Select Account for Analysis")
-        account_options = ["All Accounts"] + sorted(all_data["Account"].unique().tolist())
-        selected_account = st.selectbox("Choose account", account_options)
-
-        if selected_account != "All Accounts":
-            filtered_data = all_data[all_data["Account"] == selected_account]
-        else:
-            filtered_data = all_data
-
         st.subheader("📑 Extracted Transactions")
-        st.dataframe(filtered_data.style.format({"Amount": "{:,.2f}"}))
-
-        others_df = filtered_data[filtered_data["Category"] == "Others"]
-        if not others_df.empty:
-            st.subheader("⚡ Assign Categories for Unknown Merchants")
-            for merchant in others_df["Merchant"].unique():
-                category = st.selectbox(
-                    f"Select category for {merchant}:",
-                    ["Food", "Shopping", "Travel", "Utilities", "Entertainment", "Banking", "Others"],
-                    key=merchant
-                )
-                if category != "Others":
-                    add_new_vendor(merchant, category)
-                    all_data.loc[all_data["Merchant"] == merchant, "Category"] = category
-                    st.success(f"✅ {merchant} categorized as {category}")
+        st.dataframe(all_data)
 
         st.subheader("📊 Expense Analysis")
-        analyze_expenses(filtered_data)
+        analyze_expenses(all_data)
 
         st.subheader("📥 Download Results")
-        csv_data = convert_df_to_csv(filtered_data)
-        excel_data = convert_df_to_excel(filtered_data)
-
-        st.download_button(
-            label="⬇️ Download as CSV",
-            data=csv_data,
-            file_name=f"expenses_{selected_account.replace(' ','_')}.csv",
-            mime="text/csv"
-        )
-
-        st.download_button(
-            label="⬇️ Download as Excel",
-            data=excel_data,
-            file_name=f"expenses_{selected_account.replace(' ','_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("⬇️ CSV", convert_df_to_csv(all_data), "expenses.csv", "text/csv")
+        st.download_button("⬇️ Excel", convert_df_to_excel(all_data),
+                           "expenses.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
