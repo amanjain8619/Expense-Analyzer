@@ -52,58 +52,62 @@ def parse_date(date_str):
                 return date_str
 
 # ------------------------------
-# Extract transactions from PDF (supports HDFC/ICICI/BoB + AMEX WIP)
+# Extract transactions from PDF (supports HDFC/ICICI/BoB + AMEX)
 # ------------------------------
 def extract_transactions_from_pdf(pdf_file, account_name, debug=False):
     transactions = []
     with pdfplumber.open(pdf_file) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
+
+            # 🔎 First try table-based extraction (AMEX style)
             table = page.extract_table()
-            if debug and table:
-                st.write(f"🔎 Debug Table Page {page_num}", table[:10])  # show first 10 rows
-
             if table:
-                # TODO: Write AMEX table parser once we see structure
-                pass
+                if debug:
+                    st.write(f"🔎 Debug Table Page {page_num} (first 10 rows)", table[:10])
 
-            text = page.extract_text()
-            if debug and text:
-                st.write(f"🔎 Debug Text Page {page_num}", text.split("\n")[:20])  # show first 20 lines
+                headers = [str(h).strip().lower() if h else "" for h in table[0]]
+                for row in table[1:]:
+                    if not any(row):
+                        continue
+                    row_data = dict(zip(headers, row))
 
-            if not text:
-                continue
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
+                    date = row_data.get("date") or row[0]
+                    merchant = row_data.get("description") or row[1]
+                    amount = row_data.get("amount") or row[-2]
+                    drcr = row_data.get("drcr") or row[-1]
 
-            i = 0
-            while i < len(lines):
-                line = lines[i]
+                    if not date or not amount:
+                        continue
 
-                # --- Standard HDFC/ICICI/BoB style ---
-                m = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\s?(CR|DR)?", line)
-                if m:
-                    date, merchant, amount, drcr = m.groups()
-                    amt = float(amount.replace(",", ""))
-                    if drcr == "CR":
-                        amt = -amt
-                    transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr if drcr else "DR", account_name])
-                    i += 1
+                    try:
+                        amt = float(str(amount).replace(",", ""))
+                        if drcr and str(drcr).strip().upper().startswith("CR"):
+                            amt = -amt
+                            drcr = "CR"
+                        else:
+                            drcr = "DR"
+                        transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr, account_name])
+                    except:
+                        continue
+
+            # Fallback: regex-based parsing (HDFC/ICICI/BoB style)
+            else:
+                text = page.extract_text()
+                if debug and text:
+                    st.write(f"🔎 Debug Text Page {page_num}", text.split("\n")[:20])
+
+                if not text:
                     continue
+                lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-                # --- AMEX style: "July 01 MERCHANT 123.45" (WIP) ---
-                m2 = re.match(r"([A-Za-z]{3,9}\s+\d{1,2})\s+(.+?)\s+([\d,]+\.\d{2})$", line)
-                if m2:
-                    date, merchant, amount = m2.groups()
-                    amt = float(amount.replace(",", ""))
-                    drcr = "DR"
-                    if i+1 < len(lines) and lines[i+1].strip().upper() == "CR":
-                        amt = -amt
-                        drcr = "CR"
-                        i += 1
-                    transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr, account_name])
-                    i += 1
-                    continue
-
-                i += 1
+                for line in lines:
+                    match = re.match(r"(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})\s?(CR|DR)?", line)
+                    if match:
+                        date, merchant, amount, drcr = match.groups()
+                        amt = float(amount.replace(",", ""))
+                        if drcr == "CR":
+                            amt = -amt
+                        transactions.append([parse_date(date), merchant.strip(), round(amt, 2), drcr if drcr else "DR", account_name])
 
             st.info(f"📄 Page {page_num}: extracted {len(transactions)} rows so far")
 
